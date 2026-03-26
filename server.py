@@ -1,63 +1,65 @@
 import asyncio
 import os
-from aiohttp import web
-import aiohttp
+import websockets
+from websockets.server import serve
+from websockets.http11 import Request, Response
+from websockets.datastructures import Headers
 
 connected_clients = set()
 
 # ── WebSocket Handler ─────────────────────────────────────────────
-async def websocket_handler(request):
-    ws = web.WebSocketResponse(
-        heartbeat=20,
-        max_msg_size=2*1024*1024
-    )
-    await ws.prepare(request)
-
-    connected_clients.add(ws)
-    print(f"🟢 WS Connected! Total: {len(connected_clients)}", flush=True)
-
+async def audio_broker(websocket):
+    connected_clients.add(websocket)
+    print(f"🟢 Connected! Total: {len(connected_clients)}", flush=True)
     try:
-        async for msg in ws:
-            if msg.type == aiohttp.WSMsgType.BINARY:
-                others = [c for c in connected_clients if c is not ws]
-                if others:
-                    await asyncio.gather(
-                        *[c.send_bytes(msg.data) for c in others],
-                        return_exceptions=True
-                    )
-            elif msg.type == aiohttp.WSMsgType.TEXT:
-                others = [c for c in connected_clients if c is not ws]
-                if others:
-                    await asyncio.gather(
-                        *[c.send_str(msg.data) for c in others],
-                        return_exceptions=True
-                    )
-            elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
-                break
+        async for message in websocket:
+            others = [c for c in connected_clients if c != websocket]
+            if others:
+                await asyncio.gather(
+                    *[c.send(message) for c in others],
+                    return_exceptions=True
+                )
+    except websockets.exceptions.ConnectionClosedOK:
+        print("🔴 Disconnected cleanly", flush=True)
     except Exception as e:
-        print(f"💥 WS Error: {e}", flush=True)
+        print(f"💥 Error: {e}", flush=True)
     finally:
-        connected_clients.discard(ws)
-        print(f"👥 Remaining clients: {len(connected_clients)}", flush=True)
+        connected_clients.discard(websocket)
+        print(f"👥 Remaining: {len(connected_clients)}", flush=True)
 
-    return ws
+# ── HTTP health check interceptor ────────────────────────────────
+# Called for every incoming request BEFORE the WebSocket handshake.
+# If it's a plain HTTP GET (no Upgrade header), return 200 OK immediately.
+async def health_check(connection, request):
+    upgrade = request.headers.get("Upgrade", "").lower()
+    if upgrade != "websocket":
+        # Plain HTTP request — return 200 so Railway health check passes
+        response = connection.respond(
+            http.HTTPStatus.OK,
+            "AudioCloud OK\n"
+        )
+        return response
+    # Otherwise let the WebSocket handshake proceed normally
+    return None
 
-# ── HTTP Health Check (stops Railway from killing the container) ──
-async def health(request):
-    return web.Response(
-        text=f"AudioCloud OK — {len(connected_clients)} client(s) connected",
-        status=200
-    )
+import http
 
-# ── App Setup ─────────────────────────────────────────────────────
-def make_app():
-    app = web.Application()
-    app.router.add_get("/",       health)
-    app.router.add_get("/health", health)
-    app.router.add_get("/ws",     websocket_handler)
-    return app
-
-if __name__ == "__main__":
+async def main():
     port = int(os.environ.get("PORT", 8080))
     print(f"🚀 Starting AudioCloud on port {port}", flush=True)
-    web.run_app(make_app(), host="0.0.0.0", port=port)
+
+    async with websockets.serve(
+        audio_broker,
+        "0.0.0.0",
+        port,
+        process_request=health_check,
+        ping_interval=20,
+        ping_timeout=10,
+        max_size=2 * 1024 * 1024,
+        close_timeout=10,
+    ):
+        print(f"✅ Listening on port {port}", flush=True)
+        await asyncio.Future()
+
+if __name__ == "__main__":
+    asyncio.run(main())
