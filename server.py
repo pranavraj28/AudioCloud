@@ -1,46 +1,63 @@
 import asyncio
 import os
-import websockets
+from aiohttp import web
+import aiohttp
 
 connected_clients = set()
 
-async def audio_broker(websocket):
-    connected_clients.add(websocket)
-    print(f"🟢 Connected! Total: {len(connected_clients)}", flush=True)
+# ── WebSocket Handler ─────────────────────────────────────────────
+async def websocket_handler(request):
+    ws = web.WebSocketResponse(
+        heartbeat=20,
+        max_msg_size=2*1024*1024
+    )
+    await ws.prepare(request)
+
+    connected_clients.add(ws)
+    print(f"🟢 WS Connected! Total: {len(connected_clients)}", flush=True)
+
     try:
-        async for message in websocket:
-            others = [c for c in connected_clients if c != websocket]
-            if others:
-                await asyncio.gather(
-                    *[c.send(message) for c in others],
-                    return_exceptions=True
-                )
-    except websockets.exceptions.ConnectionClosedOK:
-        print("🔴 Disconnected cleanly", flush=True)
-    except websockets.exceptions.ConnectionClosedError as e:
-        print(f"🔴 Connection closed with error: {e}", flush=True)
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.BINARY:
+                others = [c for c in connected_clients if c is not ws]
+                if others:
+                    await asyncio.gather(
+                        *[c.send_bytes(msg.data) for c in others],
+                        return_exceptions=True
+                    )
+            elif msg.type == aiohttp.WSMsgType.TEXT:
+                others = [c for c in connected_clients if c is not ws]
+                if others:
+                    await asyncio.gather(
+                        *[c.send_str(msg.data) for c in others],
+                        return_exceptions=True
+                    )
+            elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
+                break
     except Exception as e:
-        print(f"💥 Error: {e}", flush=True)
+        print(f"💥 WS Error: {e}", flush=True)
     finally:
-        connected_clients.discard(websocket)
-        print(f"👥 Remaining: {len(connected_clients)}", flush=True)
+        connected_clients.discard(ws)
+        print(f"👥 Remaining clients: {len(connected_clients)}", flush=True)
 
-async def main():
-    # Railway injects PORT as an environment variable — MUST bind to it
-    port = int(os.environ.get("PORT", 8080))
-    print(f"🚀 Starting on port {port}", flush=True)
+    return ws
 
-    async with websockets.serve(
-        audio_broker,
-        "0.0.0.0",
-        port,
-        ping_interval=20,
-        ping_timeout=10,
-        max_size=2 * 1024 * 1024,   # 2MB max message
-        close_timeout=10,
-    ):
-        print(f"✅ Listening on port {port}", flush=True)
-        await asyncio.Future()  # run forever
+# ── HTTP Health Check (stops Railway from killing the container) ──
+async def health(request):
+    return web.Response(
+        text=f"AudioCloud OK — {len(connected_clients)} client(s) connected",
+        status=200
+    )
+
+# ── App Setup ─────────────────────────────────────────────────────
+def make_app():
+    app = web.Application()
+    app.router.add_get("/",       health)
+    app.router.add_get("/health", health)
+    app.router.add_get("/ws",     websocket_handler)
+    return app
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    port = int(os.environ.get("PORT", 8080))
+    print(f"🚀 Starting AudioCloud on port {port}", flush=True)
+    web.run_app(make_app(), host="0.0.0.0", port=port)
