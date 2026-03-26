@@ -17,6 +17,8 @@ async def audio_broker(websocket):
                 )
     except websockets.exceptions.ConnectionClosedOK:
         print("🔴 Disconnected cleanly", flush=True)
+    except websockets.exceptions.ConnectionClosedError as e:
+        print(f"🔴 Connection closed with error: {e}", flush=True)
     except Exception as e:
         print(f"💥 Error: {e}", flush=True)
     finally:
@@ -24,15 +26,21 @@ async def audio_broker(websocket):
         print(f"👥 Remaining: {len(connected_clients)}", flush=True)
 
 async def main():
-    port = int(os.environ.get("PORT", 8765))
+    # Railway injects PORT as an environment variable — MUST bind to it
+    port = int(os.environ.get("PORT", 8080))
     print(f"🚀 Starting on port {port}", flush=True)
+
     async with websockets.serve(
-        audio_broker, "0.0.0.0", port,
-        ping_interval=20, ping_timeout=10,
-        max_size=2*1024*1024
+        audio_broker,
+        "0.0.0.0",
+        port,
+        ping_interval=20,
+        ping_timeout=10,
+        max_size=2 * 1024 * 1024,   # 2MB max message
+        close_timeout=10,
     ):
         print(f"✅ Listening on port {port}", flush=True)
-        await asyncio.Future()
+        await asyncio.Future()  # run forever
 
 if __name__ == "__main__":
     asyncio.run(main())
