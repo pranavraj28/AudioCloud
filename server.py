@@ -2,33 +2,31 @@ import asyncio
 import os
 import websockets
 
-# Keep track of everyone connected (Sender and Receivers)
+# Store connected clients
 connected_clients = set()
 
-async def audio_broker(websocket, path):
-    # When a new device connects, add them to the list
+async def audio_server(websocket, path):
+    print("🟢 New Client Connected!")
     connected_clients.add(websocket)
-    print(f"🟢 Device connected! Total devices: {len(connected_clients)}")
-
     try:
-        # Listen continuously for incoming audio packets
+        # Continuously listen for messages
         async for message in websocket:
-            # Broadcast this exact audio packet to all OTHER connected devices
+            # 'message' comes in as raw bytes. 
+            # We blindly broadcast it to everyone else.
             for client in connected_clients:
                 if client != websocket:
                     await client.send(message)
-
-    except websockets.exceptions.ConnectionClosed:
-        print("🔴 Device disconnected.")
+    except Exception as e:
+        print(f"❌ Error: {e}")
     finally:
-        # Clean up when a device leaves
         connected_clients.remove(websocket)
+        print("🔴 Client Disconnected")
 
 async def main():
-    # Render will automatically provide a PORT number
-    port = int(os.environ.get("PORT", 8765))
-    async with websockets.serve(audio_broker, "0.0.0.0", port):
-        print(f"🚀 Cloud Audio Server running on port {port}")
+    # Railway provides the PORT environment variable
+    port = int(os.environ.get("PORT", 8080))
+    print(f"🚀 Server listening on port {port}")
+    async with websockets.serve(audio_server, "0.0.0.0", port):
         await asyncio.Future()  # Run forever
 
 if __name__ == "__main__":
